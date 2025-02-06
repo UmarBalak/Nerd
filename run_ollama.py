@@ -1,31 +1,51 @@
 import re
+import chromadb
 from langchain_ollama import OllamaLLM
 
 class OllamaAssistant:
-    def __init__(self, model="llama3.2:latest", system_prompt=None, history_file="conversation_history.txt"):
+    def __init__(self, model="llama3.2:latest", system_prompt=None, db_path="./chroma_db"):
         self.model = model
-        self.conversation_history = []
-        self.history_file = history_file
-        with open("system_prompt.txt", "r") as file:
-            self.system_prompt = file.read()
-        if system_prompt:
-            self.system_prompt += system_prompt
+
+        # Load system prompt from file
+        self.system_prompt = system_prompt or self.load_system_prompt()
+
+        # Initialize chromadb client
+        self.client = chromadb.PersistentClient(db_path)
+        self.collection = self.client.get_or_create_collection("conversations_history")
+    
+    def load_system_prompt(self):
+        try:
+            with open("system_prompt.txt", "r", encoding="utf-8") as file:
+                return file.read()
+        except FileNotFoundError:
+            return ""
+
+    def store_conversation(self, user_query, assistant_response):
+        """Stores the conversation in ChromaDB."""
+        self.collection.add(
+            documents=[user_query, assistant_response], # Text data
+            ids=[f"user-{len(self.collection.get()['ids'])}",
+                 f"assistant-{len(self.collection.get()['ids'])}"] # Unique IDs for user and assistant
+        )
+    
+    def get_recent_context(self, num_messages=20):
+        """Retrieves the last 'num_messages' from the conversation history."""
+        all_data = self.collection.get()
+        messages = list(zip(all_data["ids"], all_data["documents"]))
+        return "\n".join([msg[1] for msg in messages[-num_messages:]])
 
     def get_response(self, query):
-        # Incorporate conversation history for context
-        full_context = "\n".join(self.conversation_history + [f"User Query: {query}"])
+        # Retrive recent history from chromadb
+        recent_context = self.get_recent_context()
+
+        # Format the full context
+        full_context = f"{self.system_prompt}\n\nRecent Conversation History:\n{recent_context}\n\nUser Query:\n{query}"
         
         llm = OllamaLLM(model=self.model)
-        response = llm.invoke(f"{self.system_prompt}\n\nConversation History and Current Query:\n{full_context}")
+        response = llm.invoke(full_context)
         
-        # Store conversation history
-        self.conversation_history.append(f"User: {query}")
-        self.conversation_history.append(f"Assistant: {response}")
-        
-        # Write conversation history to file
-        with open(self.history_file, "a") as file:
-            file.write(f"User: {query}\n")
-            file.write(f"Assistant: {response}\n\n")
+        # Store the new conversation
+        self.store_conversation(query, response)
         
         return response
 
